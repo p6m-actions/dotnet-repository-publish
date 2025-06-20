@@ -1,0 +1,262 @@
+name: "Dotnet Repository Publish"
+description: "A GitHub Action that packages and publishes .NET libraries to configured NuGet repositories"
+author: "Jimmie Fulton <jimmie.fulton@gmail.com>"
+
+# Define the inputs for this action
+inputs:
+  solution-path:
+    description: "Path to the solution file or directory containing projects to publish"
+    required: false
+    default: "."
+  configuration:
+    description: "Build configuration (Debug or Release)"
+    required: false
+    default: "Release"
+  projects:
+    description: "Specific project paths to publish (one per line). If not specified, all packable projects will be published"
+    required: false
+    default: ""
+  package-version:
+    description: "Version to assign to the packages. If not specified, uses project version"
+    required: false
+    default: ""
+  repositories:
+    description: "Repository names to publish to (one per line). Must match names configured in dotnet-repository-login. If not specified, publishes to all configured repositories"
+    required: false
+    default: ""
+  skip-duplicate:
+    description: "Skip publishing if package version already exists"
+    required: false
+    default: "true"
+  include-symbols:
+    description: "Include symbol packages (.snupkg)"
+    required: false
+    default: "false"
+  dry-run:
+    description: "Perform a dry run without actually publishing"
+    required: false
+    default: "false"
+  verbosity:
+    description: "MSBuild verbosity level"
+    required: false
+    default: "minimal"
+
+# Define the outputs for this action
+outputs:
+  published-packages:
+    description: "List of successfully published packages with their versions"
+    value: ${{ steps.publish.outputs.published-packages }}
+  published-count:
+    description: "Number of packages successfully published"
+    value: ${{ steps.publish.outputs.published-count }}
+  skipped-packages:
+    description: "List of packages that were skipped (e.g., due to duplicates)"
+    value: ${{ steps.publish.outputs.skipped-packages }}
+
+# Define the runs configuration
+runs:
+  using: "composite"
+  steps:
+    - name: Publish NuGet packages
+      id: publish
+      shell: bash
+      run: |
+        set -e
+
+        published_packages=""
+        published_count=0
+        skipped_packages=""
+        
+        echo "Starting .NET package publishing process..."
+        
+        # Function to log with timestamp
+        log() {
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+        }
+        
+        # Find packable projects
+        if [[ -n "${{ inputs.projects }}" ]]; then
+          log "Using specified projects from input"
+          projects_to_publish=()
+          while IFS= read -r project; do
+            if [[ -n "$project" && "$project" != \#* ]]; then
+              if [[ -f "$project" ]]; then
+                projects_to_publish+=("$project")
+                log "Added project: $project"
+              else
+                log "Warning: Project file not found: $project"
+              fi
+            fi
+          done <<< "${{ inputs.projects }}"
+        else
+          log "Discovering packable projects in solution..."
+          # Find all .csproj files that have IsPackable=true or PackageId
+          projects_to_publish=()
+          while IFS= read -r -d '' project; do
+            if grep -q -E "(IsPackable.*true|PackageId)" "$project" 2>/dev/null; then
+              projects_to_publish+=("$project")
+              log "Found packable project: $project"
+            fi
+          done < <(find "${{ inputs.solution-path }}" -name "*.csproj" -print0)
+          
+          # If no projects found with explicit packaging config, look for projects in solution
+          if [[ ${#projects_to_publish[@]} -eq 0 ]]; then
+            log "No explicitly packable projects found, checking all projects in solution..."
+            while IFS= read -r -d '' project; do
+              # Skip test projects
+              if [[ ! "$project" =~ \.(Test|Tests|IntegrationTest|UnitTest|PerformanceTest) ]]; then
+                projects_to_publish+=("$project")
+                log "Added project: $project"
+              fi
+            done < <(find "${{ inputs.solution-path }}" -name "*.csproj" -print0)
+          fi
+        fi
+        
+        if [[ ${#projects_to_publish[@]} -eq 0 ]]; then
+          log "Error: No projects found to publish"
+          exit 1
+        fi
+        
+        log "Found ${#projects_to_publish[@]} projects to publish"
+        
+        # Get list of repositories to publish to
+        target_repositories=()
+        if [[ -n "${{ inputs.repositories }}" ]]; then
+          while IFS= read -r repo; do
+            if [[ -n "$repo" && "$repo" != \#* ]]; then
+              target_repositories+=("$repo")
+              log "Will publish to repository: $repo"
+            fi
+          done <<< "${{ inputs.repositories }}"
+        else
+          log "No specific repositories specified, will use all configured sources"
+        fi
+        
+        # Build version arguments
+        version_args=""
+        if [[ -n "${{ inputs.package-version }}" ]]; then
+          version_args="-p:PackageVersion=${{ inputs.package-version }} -p:Version=${{ inputs.package-version }}"
+          log "Using specified package version: ${{ inputs.package-version }}"
+        fi
+        
+        # Process each project
+        for project in "${projects_to_publish[@]}"; do
+          log "Processing project: $project"
+          
+          # Extract project name for logging
+          project_name=$(basename "$project" .csproj)
+          
+          # Pack the project
+          log "Packing $project_name..."
+          pack_args="$project --configuration ${{ inputs.configuration }} --no-build --output ./packages --verbosity ${{ inputs.verbosity }}"
+          
+          if [[ -n "$version_args" ]]; then
+            pack_args="$pack_args $version_args"
+          fi
+          
+          if [[ "${{ inputs.include-symbols }}" == "true" ]]; then
+            pack_args="$pack_args --include-symbols --include-source"
+          fi
+          
+          if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+            log "DRY RUN: Would execute: dotnet pack $pack_args"
+          else
+            if dotnet pack $pack_args; then
+              log "✓ Successfully packed $project_name"
+            else
+              log "✗ Failed to pack $project_name"
+              continue
+            fi
+          fi
+          
+          # Find the generated package files
+          package_files=($(find ./packages -name "${project_name}*.nupkg" -not -name "*.symbols.nupkg" 2>/dev/null || true))
+          
+          if [[ ${#package_files[@]} -eq 0 ]]; then
+            log "Warning: No package files found for $project_name"
+            continue
+          fi
+          
+          # Publish to repositories
+          for package_file in "${package_files[@]}"; do
+            package_filename=$(basename "$package_file")
+            log "Publishing package: $package_filename"
+            
+            if [[ ${#target_repositories[@]} -gt 0 ]]; then
+              # Publish to specific repositories
+              for repo in "${target_repositories[@]}"; do
+                log "Publishing $package_filename to repository: $repo"
+                
+                publish_args="$package_file --source $repo --verbosity ${{ inputs.verbosity }}"
+                
+                if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
+                  publish_args="$publish_args --skip-duplicate"
+                fi
+                
+                if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+                  log "DRY RUN: Would execute: dotnet nuget push $publish_args"
+                  published_packages="${published_packages}${package_filename}@${repo},"
+                  ((published_count++))
+                else
+                  if dotnet nuget push $publish_args; then
+                    log "✓ Successfully published $package_filename to $repo"
+                    published_packages="${published_packages}${package_filename}@${repo},"
+                    ((published_count++))
+                  elif [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
+                    log "⚠ Package $package_filename already exists in $repo (skipped)"
+                    skipped_packages="${skipped_packages}${package_filename}@${repo},"
+                  else
+                    log "✗ Failed to publish $package_filename to $repo"
+                  fi
+                fi
+              done
+            else
+              # Publish to all configured sources (using dotnet nuget push without --source)
+              log "Publishing $package_filename to all configured sources"
+              
+              publish_args="$package_file --verbosity ${{ inputs.verbosity }}"
+              
+              if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
+                publish_args="$publish_args --skip-duplicate"
+              fi
+              
+              if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+                log "DRY RUN: Would execute: dotnet nuget push $publish_args"
+                published_packages="${published_packages}${package_filename},"
+                ((published_count++))
+              else
+                if dotnet nuget push $publish_args; then
+                  log "✓ Successfully published $package_filename"
+                  published_packages="${published_packages}${package_filename},"
+                  ((published_count++))
+                elif [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
+                  log "⚠ Package $package_filename already exists (skipped)"
+                  skipped_packages="${skipped_packages}${package_filename},"
+                else
+                  log "✗ Failed to publish $package_filename"
+                fi
+              fi
+            fi
+          done
+        done
+        
+        # Clean up trailing commas
+        published_packages=${published_packages%,}
+        skipped_packages=${skipped_packages%,}
+        
+        # Set outputs
+        echo "published-packages=$published_packages" >> $GITHUB_OUTPUT
+        echo "published-count=$published_count" >> $GITHUB_OUTPUT
+        echo "skipped-packages=$skipped_packages" >> $GITHUB_OUTPUT
+        
+        log "Publishing complete!"
+        log "Published packages: $published_packages"
+        log "Published count: $published_count"
+        log "Skipped packages: $skipped_packages"
+      env:
+        DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+# Define the branding for the action in the GitHub Marketplace
+branding:
+  icon: "award"
+  color: "blue"
