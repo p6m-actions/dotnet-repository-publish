@@ -40,6 +40,10 @@ inputs:
     description: "MSBuild verbosity level"
     required: false
     default: "minimal"
+  api-key:
+    description: "API key for NuGet repository authentication (format: username:token)"
+    required: false
+    default: ""
 
 # Define the outputs for this action
 outputs:
@@ -139,6 +143,27 @@ runs:
           log "Using specified package version: ${{ inputs.package-version }}"
         fi
         
+        # Function to get API key for a repository
+        get_api_key() {
+          local repo_name="$1"
+          local config_file="$HOME/.nuget/NuGet/NuGet.Config"
+          
+          if [[ ! -f "$config_file" ]]; then
+            echo ""
+            return
+          fi
+          
+          # Extract username and password from NuGet.Config
+          local username=$(xmllint --xpath "//configuration/packageSourceCredentials/${repo_name}/add[@key='Username']/@value" "$config_file" 2>/dev/null | sed 's/.*value="\([^"]*\)".*/\1/')
+          local password=$(xmllint --xpath "//configuration/packageSourceCredentials/${repo_name}/add[@key='ClearTextPassword']/@value" "$config_file" 2>/dev/null | sed 's/.*value="\([^"]*\)".*/\1/')
+          
+          if [[ -n "$username" && -n "$password" ]]; then
+            echo "${username}:${password}"
+          else
+            echo ""
+          fi
+        }
+        
         # Process each project
         for project in "${projects_to_publish[@]}"; do
           log "Processing project: $project"
@@ -189,6 +214,18 @@ runs:
                 
                 publish_args="$package_file --source $repo"
                 
+                # Get API key for this repository
+                api_key=""
+                if [[ -n "${{ inputs.api-key }}" ]]; then
+                  api_key="${{ inputs.api-key }}"
+                else
+                  api_key=$(get_api_key "$repo")
+                fi
+                
+                if [[ -n "$api_key" ]]; then
+                  publish_args="$publish_args --api-key \"$api_key\""
+                fi
+                
                 if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
                   publish_args="$publish_args --skip-duplicate"
                 fi
@@ -215,6 +252,11 @@ runs:
               log "Publishing $package_filename to all configured sources"
               
               publish_args="$package_file"
+              
+              # Get API key for publishing to all sources
+              if [[ -n "${{ inputs.api-key }}" ]]; then
+                publish_args="$publish_args --api-key \"${{ inputs.api-key }}\""
+              fi
               
               if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
                 publish_args="$publish_args --skip-duplicate"
