@@ -187,7 +187,7 @@ runs:
               for repo in "${target_repositories[@]}"; do
                 log "Publishing $package_filename to repository: $repo"
                 
-                publish_args="$package_file --source $repo --verbosity ${{ inputs.verbosity }}"
+                publish_args="$package_file --source $repo"
                 
                 if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
                   publish_args="$publish_args --skip-duplicate"
@@ -214,7 +214,7 @@ runs:
               # Publish to all configured sources (using dotnet nuget push without --source)
               log "Publishing $package_filename to all configured sources"
               
-              publish_args="$package_file --verbosity ${{ inputs.verbosity }}"
+              publish_args="$package_file"
               
               if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
                 publish_args="$publish_args --skip-duplicate"
