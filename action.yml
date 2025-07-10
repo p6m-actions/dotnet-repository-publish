@@ -21,7 +21,7 @@ inputs:
     required: false
     default: ""
   repositories:
-    description: "Repository names to publish to (one per line). Must match names configured in dotnet-repository-login. If not specified, publishes to all configured repositories"
+    description: "Repository names to publish to (one per line). If not specified, publishes to all configured repositories"
     required: false
     default: ""
   skip-duplicate:
@@ -41,7 +41,7 @@ inputs:
     required: false
     default: "minimal"
   api-key:
-    description: "API key for NuGet repository authentication (format: username:token)"
+    description: "API key for NuGet repository authentication (format: username:token). If not provided, will use NUGET_API_KEY environment variable"
     required: false
     default: ""
 
@@ -123,6 +123,17 @@ runs:
         
         log "Found ${#projects_to_publish[@]} projects to publish"
         
+        # Validate API key is provided
+        api_key="${{ inputs.api-key }}"
+        if [[ -z "$api_key" ]]; then
+          api_key="$NUGET_API_KEY"
+        fi
+        if [[ -z "$api_key" ]]; then
+          log "Error: No API key provided. Set the api-key input or NUGET_API_KEY environment variable."
+          exit 1
+        fi
+        log "API key configured for authentication"
+        
         # Get list of repositories to publish to
         target_repositories=()
         if [[ -n "${{ inputs.repositories }}" ]]; then
@@ -143,33 +154,20 @@ runs:
           log "Using specified package version: ${{ inputs.package-version }}"
         fi
         
-        # Function to get API key for a repository
-        get_api_key() {
-          local repo_name="$1"
-          local config_file="$HOME/.nuget/NuGet/NuGet.Config"
-          
-          if [[ ! -f "$config_file" ]]; then
-            echo ""
-            return
-          fi
-          
-          # Extract username and password from NuGet.Config
-          local username=$(xmllint --xpath "//configuration/packageSourceCredentials/${repo_name}/add[@key='Username']/@value" "$config_file" 2>/dev/null | sed 's/.*value="\([^"]*\)".*/\1/')
-          local password=$(xmllint --xpath "//configuration/packageSourceCredentials/${repo_name}/add[@key='ClearTextPassword']/@value" "$config_file" 2>/dev/null | sed 's/.*value="\([^"]*\)".*/\1/')
-          
-          if [[ -n "$username" && -n "$password" ]]; then
-            echo "${username}:${password}"
-          else
-            echo ""
-          fi
-        }
-        
         # Process each project
         for project in "${projects_to_publish[@]}"; do
           log "Processing project: $project"
           
           # Extract project name for logging
           project_name=$(basename "$project" .csproj)
+          project_dir=$(dirname "$project")
+          
+          # Check if project has been built
+          if [[ ! -d "$project_dir/bin/${{ inputs.configuration }}" ]]; then
+            log "Error: Project $project_name appears not to be built. No bin/${{ inputs.configuration }} directory found."
+            log "Please run 'dotnet build --configuration ${{ inputs.configuration }}' before publishing."
+            exit 1
+          fi
           
           # Pack the project
           log "Packing $project_name..."
@@ -212,30 +210,19 @@ runs:
               for repo in "${target_repositories[@]}"; do
                 log "Publishing $package_filename to repository: $repo"
                 
-                publish_args="$package_file --source $repo"
-                
-                # Get API key for this repository
-                api_key=""
-                if [[ -n "${{ inputs.api-key }}" ]]; then
-                  api_key="${{ inputs.api-key }}"
-                else
-                  api_key=$(get_api_key "$repo")
-                fi
-                
-                if [[ -n "$api_key" ]]; then
-                  publish_args="$publish_args --api-key \"$api_key\""
-                fi
+                # Build command array to handle spaces and quotes properly
+                push_cmd=("dotnet" "nuget" "push" "$package_file" "--source" "$repo" "--api-key" "$api_key")
                 
                 if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
-                  publish_args="$publish_args --skip-duplicate"
+                  push_cmd+=("--skip-duplicate")
                 fi
                 
                 if [[ "${{ inputs.dry-run }}" == "true" ]]; then
-                  log "DRY RUN: Would execute: dotnet nuget push $publish_args"
+                  log "DRY RUN: Would execute: ${push_cmd[*]}"
                   published_packages="${published_packages}${package_filename}@${repo},"
                   ((published_count++))
                 else
-                  if dotnet nuget push $publish_args; then
+                  if "${push_cmd[@]}"; then
                     log "✓ Successfully published $package_filename to $repo"
                     published_packages="${published_packages}${package_filename}@${repo},"
                     ((published_count++))
@@ -244,6 +231,8 @@ runs:
                     skipped_packages="${skipped_packages}${package_filename}@${repo},"
                   else
                     log "✗ Failed to publish $package_filename to $repo"
+                    log "Command failed: ${push_cmd[*]}"
+                    log "Check repository URL, API key permissions, and network connectivity"
                   fi
                 fi
               done
@@ -251,23 +240,19 @@ runs:
               # Publish to all configured sources (using dotnet nuget push without --source)
               log "Publishing $package_filename to all configured sources"
               
-              publish_args="$package_file"
-              
-              # Get API key for publishing to all sources
-              if [[ -n "${{ inputs.api-key }}" ]]; then
-                publish_args="$publish_args --api-key \"${{ inputs.api-key }}\""
-              fi
+              # Build command array to handle spaces and quotes properly
+              push_cmd=("dotnet" "nuget" "push" "$package_file" "--api-key" "$api_key")
               
               if [[ "${{ inputs.skip-duplicate }}" == "true" ]]; then
-                publish_args="$publish_args --skip-duplicate"
+                push_cmd+=("--skip-duplicate")
               fi
               
               if [[ "${{ inputs.dry-run }}" == "true" ]]; then
-                log "DRY RUN: Would execute: dotnet nuget push $publish_args"
+                log "DRY RUN: Would execute: ${push_cmd[*]}"
                 published_packages="${published_packages}${package_filename},"
                 ((published_count++))
               else
-                if dotnet nuget push $publish_args; then
+                if "${push_cmd[@]}"; then
                   log "✓ Successfully published $package_filename"
                   published_packages="${published_packages}${package_filename},"
                   ((published_count++))
@@ -276,6 +261,8 @@ runs:
                   skipped_packages="${skipped_packages}${package_filename},"
                 else
                   log "✗ Failed to publish $package_filename"
+                  log "Command failed: ${push_cmd[*]}"
+                  log "Check configured NuGet sources, API key permissions, and network connectivity"
                 fi
               fi
             fi
