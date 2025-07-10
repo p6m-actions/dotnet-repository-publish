@@ -65,7 +65,8 @@ runs:
       id: publish
       shell: bash
       run: |
-
+        set +e  # Disable exit on error - we handle errors ourselves
+        
         published_packages=""
         published_count=0
         skipped_packages=""
@@ -228,7 +229,13 @@ runs:
                   published_packages="${published_packages}${package_filename}@${repo},"
                   ((published_count++))
                 else
-                  if "${push_cmd[@]}"; then
+                  # Capture output and exit code
+                  push_output=$("${push_cmd[@]}" 2>&1)
+                  push_exit_code=$?
+                  echo "$push_output"
+                  
+                  # Check for success indicators in output
+                  if [[ "$push_output" =~ "Your package was pushed" ]] || [[ "$push_output" =~ "was already pushed" ]] || [[ "$push_output" =~ "Forbidden" && "${{ inputs.skip-duplicate }}" == "true" ]]; then
                     log "✓ Successfully published $package_filename to $repo"
                     published_packages="${published_packages}${package_filename}@${repo},"
                     ((published_count++))
@@ -258,7 +265,13 @@ runs:
                 published_packages="${published_packages}${package_filename},"
                 ((published_count++))
               else
-                if "${push_cmd[@]}"; then
+                # Capture output and exit code
+                push_output=$("${push_cmd[@]}" 2>&1)
+                push_exit_code=$?
+                echo "$push_output"
+                
+                # Check for success indicators in output
+                if [[ "$push_output" =~ "Your package was pushed" ]] || [[ "$push_output" =~ "was already pushed" ]] || [[ "$push_output" =~ "Forbidden" && "${{ inputs.skip-duplicate }}" == "true" ]]; then
                   log "✓ Successfully published $package_filename"
                   published_packages="${published_packages}${package_filename},"
                   ((published_count++))
