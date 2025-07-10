@@ -65,11 +65,12 @@ runs:
       id: publish
       shell: bash
       run: |
-        set -e
 
         published_packages=""
         published_count=0
         skipped_packages=""
+        failed_projects=""
+        has_errors=false
         
         echo "Starting .NET package publishing process..."
         
@@ -166,7 +167,10 @@ runs:
           if [[ ! -d "$project_dir/bin/${{ inputs.configuration }}" ]]; then
             log "Error: Project $project_name appears not to be built. No bin/${{ inputs.configuration }} directory found."
             log "Please run 'dotnet build --configuration ${{ inputs.configuration }}' before publishing."
-            exit 1
+            log "Skipping $project_name and continuing with other projects..."
+            failed_projects="${failed_projects}${project_name},"
+            has_errors=true
+            continue
           fi
           
           # Pack the project
@@ -188,6 +192,8 @@ runs:
               log "✓ Successfully packed $project_name"
             else
               log "✗ Failed to pack $project_name"
+              failed_projects="${failed_projects}${project_name},"
+              has_errors=true
               continue
             fi
           fi
@@ -272,6 +278,7 @@ runs:
         # Clean up trailing commas
         published_packages=${published_packages%,}
         skipped_packages=${skipped_packages%,}
+        failed_projects=${failed_projects%,}
         
         # Set outputs
         echo "published-packages=$published_packages" >> $GITHUB_OUTPUT
@@ -282,6 +289,14 @@ runs:
         log "Published packages: $published_packages"
         log "Published count: $published_count"
         log "Skipped packages: $skipped_packages"
+        
+        if [[ "$has_errors" == "true" ]]; then
+          log "⚠ Some projects failed to process: $failed_projects"
+          log "Action completed with errors - check logs above for details"
+          exit 1
+        else
+          log "✓ All projects processed successfully"
+        fi
       env:
         DOTNET_CLI_TELEMETRY_OPTOUT: 1
 
